@@ -17,7 +17,8 @@ env:
 
 jobs:
   release:
-    runs-on: ubuntu-latest-amd64
+    # Upstream uses ubuntu-latest-amd64 (org runner); use ubuntu-latest here so GH-hosted runners work in the fork.
+    runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
@@ -79,6 +80,25 @@ jobs:
           mv sql2dbsp-jar-with-dependencies.jar sql2dbsp-jar-with-dependencies-v${{ env.CURRENT_VERSION }}.jar
           mv feldera-docs.zip feldera-docs-v${{ env.CURRENT_VERSION }}.zip
 
+      - name: Generate SBOM for release image
+        uses: anchore/sbom-action@v0
+        with:
+          image: ${{ vars.FELDERA_IMAGE_NAME }}:sha-${{ env.SHA_TO_RELEASE }}
+          format: spdx-json
+          output-file: feldera-sbom-v${{ env.CURRENT_VERSION }}.spdx.json
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate SBOM for source dependencies
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          exclude: |
+            node_modules
+            target
+          format: spdx-json
+          output-file: feldera-source-sbom-v${{ env.CURRENT_VERSION }}.spdx.json
+
       - name: Generate Release token
         id: release-token
         uses: actions/create-github-app-token@v2
@@ -102,6 +122,8 @@ jobs:
             feldera-binaries-v${{ env.CURRENT_VERSION }}-aarch64-unknown-linux-gnu.zip
             feldera-binaries-v${{ env.CURRENT_VERSION }}-x86_64-unknown-linux-gnu.zip
             sql2dbsp-jar-with-dependencies-v${{ env.CURRENT_VERSION }}.jar
+            feldera-sbom-v${{ env.CURRENT_VERSION }}.spdx.json
+            feldera-source-sbom-v${{ env.CURRENT_VERSION }}.spdx.json
           # A custom token is necessary so the ci-post-release.yml workflow is triggered
           # see also https://github.com/softprops/action-gh-release/issues/59
           token: ${{ steps.release-token.outputs.token }}
