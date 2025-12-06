@@ -273,42 +273,49 @@ async fn reconcile<E: PipelineExecutor + 'static>(
                     db_error_previously = false;
                 }
                 for (tenant_id, pipeline_id) in pipeline_ids {
-                    pipelines
-                        .lock()
-                        .await
-                        .entry(pipeline_id)
-                        .or_insert_with(|| {
-                            let notifier = Arc::new(Notify::new());
-                            let (follow_request_sender, follow_request_receiver) =
-                                channel::<Sender<String>>(MAXIMUM_OUTSTANDING_LOG_FOLLOW_REQUESTS);
-                            let (logs_sender, logs_receiver) =
-                                channel::<LogMessage>(MAXIMUM_BUFFERED_LINES_PER_FOLLOWER);
-                            let logs_sender = LogsSender::new(logs_sender);
-                            let pipeline_handle = E::new(
-                                pipeline_id,
-                                common_config.clone(),
-                                config.clone(),
-                                client.clone(),
-                                logs_sender.clone(),
-                            );
-                            let pipeline_runner_handle = spawn(
-                                PipelineAutomaton::new(
-                                    common_config.clone(),
-                                    pipeline_id,
-                                    tenant_id,
-                                    db.clone(),
-                                    notifier.clone(),
-                                    client.clone(),
-                                    pipeline_handle,
-                                    E::DEFAULT_PROVISIONING_TIMEOUT,
-                                    follow_request_receiver,
-                                    logs_sender,
-                                    logs_receiver,
-                                )
-                                .run(),
-                            );
-                            (pipeline_runner_handle, notifier, follow_request_sender)
-                        });
+                    let mut pipelines_guard = pipelines.lock().await;
+                    if pipelines_guard.contains_key(&pipeline_id) {
+                        continue;
+                    }
+
+                    // We intentionally do not fetch the pipeline name here to avoid
+                    // extra DB round-trips while holding the pipelines lock.
+                    let pipeline_name = None;
+
+                    let notifier = Arc::new(Notify::new());
+                    let (follow_request_sender, follow_request_receiver) =
+                        channel::<Sender<String>>(MAXIMUM_OUTSTANDING_LOG_FOLLOW_REQUESTS);
+                    let (logs_sender, logs_receiver) =
+                        channel::<LogMessage>(MAXIMUM_BUFFERED_LINES_PER_FOLLOWER);
+                    let logs_sender = LogsSender::new(logs_sender);
+                    let pipeline_handle = E::new(
+                        pipeline_id,
+                        common_config.clone(),
+                        config.clone(),
+                        client.clone(),
+                        logs_sender.clone(),
+                    );
+                    let pipeline_runner_handle = spawn(
+                        PipelineAutomaton::new(
+                            common_config.clone(),
+                            pipeline_id,
+                            pipeline_name,
+                            tenant_id,
+                            db.clone(),
+                            notifier.clone(),
+                            client.clone(),
+                            pipeline_handle,
+                            E::DEFAULT_PROVISIONING_TIMEOUT,
+                            follow_request_receiver,
+                            logs_sender,
+                            logs_receiver,
+                        )
+                        .run(),
+                    );
+                    pipelines_guard.insert(
+                        pipeline_id,
+                        (pipeline_runner_handle, notifier, follow_request_sender),
+                    );
                 }
             }
             Err(e) => {
@@ -328,11 +335,17 @@ async fn reconcile<E: PipelineExecutor + 'static>(
         for pipeline_id in finished {
             if let Some((join_handle, _, _)) = pipelines.lock().await.remove(&pipeline_id) {
                 if let Err(e) = join_handle.await {
-                    error!("Pipeline {pipeline_id} experienced a join error: {e}")
+                    error!(
+                        pipeline_id = %pipeline_id,
+                        "Pipeline {pipeline_id} experienced a join error: {e}"
+                    )
                 }
             } else {
                 // Should be unreachable as this loop is the only one removing entries
-                error!("Pipeline {pipeline_id} was marked as finished, and as such to be joined and removed. It has however already been removed.");
+                error!(
+                    pipeline_id = %pipeline_id,
+                    "Pipeline {pipeline_id} was marked as finished, and as such to be joined and removed. It has however already been removed."
+                );
             }
         }
     }
